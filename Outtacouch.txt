@@ -1,0 +1,359 @@
+OUTTACOUCH
+
+1) Project Overview
+OUTTACOUCH is an event-first social connection platform designed to translate online discovery into offline relationships. 
+The core problem is that traditional social apps prioritize engagement loops (feeds, likes, comments) instead of facilitating real-world interactions. 
+OUTTACOUCH exists to make event attendance the primary signal of identity and trust, so connections form around shared experiences rather than superficial profile activity.
+
+Why this project exists:
+- People want meaningful connections but lack a reliable way to meet others around common interests.
+- Hosts need a streamlined way to list events, manage attendance, and validate entry.
+- Existing social graphs are noisy and do not reflect real-world context.
+
+Real-world use cases:
+- A user discovers a nearby music event, commits to attend, and later connects with other attendees.
+- A host creates a paid event, sells tickets, and validates entry with QR scans.
+- A user builds a calendar-first profile that shows attended and hosted events as their social identity.
+
+Target users:
+- Attendees who want to meet new people through shared events.
+- Hosts who need tools for event publishing, ticketing, analytics, and check-ins.
+- Communities that prefer real-world trust signals over follower counts.
+
+Key product promises:
+- Relevance: discovery is ranked by location, timing, and interest match.
+- Trust: connections are anchored in shared attendance.
+- Action: the UX pushes users from browsing to committing and showing up.
+
+2) System Design (High-Level + Low-Level)
+High-level architecture is a single Next.js application that serves both the frontend and the backend API. 
+The frontend is built with the App Router and route groups: app/(auth) for authentication and onboarding flows, and app/(main) for the protected core product (explore, events, chat, profile, settings). 
+The backend is implemented as Next.js API routes in app/api, and a Socket.io server bootstrapped through pages/api/socketio.ts for realtime chat.
+Core services include PostgreSQL (via Prisma ORM), Supabase Storage (image uploads), Stripe (payments), Twilio Verify (phone OTP), and SMTP (email OTP).
+
+Low-level design splits features into modules: authentication, event discovery and management, ticketing, connections, chat, memories, notifications, and storage. 
+Each module has API endpoints that map directly to UI screens and actions. Data access flows through Prisma queries and transactions with explicit ownership checks at the endpoint level. 
+Realtime messaging uses Socket.io rooms keyed by connectionId.
+
+Data flow in a typical request follows: client action -> App Router page -> fetch to app/api endpoint -> JWT validation -> Prisma query/transaction -> JSON response -> UI state update. 
+For payments, the flow includes Stripe PaymentIntent creation, client confirmation, and webhook fulfillment for idempotency.
+
+Scalability considerations: API routes are stateless and scale horizontally. 
+Prisma uses pooled DB connections. The event feed is capped to 50 results and scored in memory. 
+Notifications and suggestions are limited in size. Socket.io is single-node and would require a Redis adapter for multi-node scaling. 
+Supabase Storage is already scalable for media.
+
+Trade-offs: A monolithic Next.js app simplifies development and deployment but couples API and UI and requires extra work for realtime scaling. Event-first connections improve relevance and safety but reduce the speed of discovery compared to follower-based models.
+
+Text diagram (system overview):
+Client (Next.js App Router UI)
+	-> API routes (app/api) for auth, events, tickets, chat, connections
+	-> Prisma ORM -> PostgreSQL
+	-> Supabase Storage for images
+	-> Stripe for payments + webhook handling
+	-> Twilio Verify/SMTP for OTP
+Realtime:
+Client <-> Socket.io server (pages/api/socketio.ts)
+
+3) Tech Stack and Design Choices
+Frontend stack (what and why):
+- Next.js App Router + React 18: unified routing, server/client component split, and easy co-location with API routes.
+- TypeScript: type-safe UI props, API payloads, and shared types.
+- Tailwind CSS: consistent design system with fast iteration.
+- Framer Motion: smooth swipe and card interactions for discovery.
+- Leaflet (react-leaflet): interactive maps for event location and picking.
+- Recharts: lightweight analytics visuals for host dashboards.
+- react-hook-form: efficient form state and validation.
+- Zustand: minimal global state for UI/auth flags.
+
+Backend stack (what and why):
+- Next.js API routes: colocated API for rapid development and deployment.
+- NextAuth Credentials + JWT: simple login with session checks in middleware.
+- Prisma ORM: typed queries, migrations, and transactional integrity.
+- PostgreSQL: relational model fits events, tickets, and connections well.
+
+Integrations (what and why):
+- Stripe PaymentIntents + webhooks: secure, PCI-compliant payments with idempotent fulfillment.
+- Supabase Storage: scalable, public media storage for images.
+- Twilio Verify: reliable phone/WhatsApp OTP verification.
+- SMTP (Nodemailer): fallback email OTP delivery.
+- Socket.io: realtime chat, typing indicators, read receipts.
+
+Design choices:
+- Monolithic Next.js app for faster iteration and simpler deployment.
+- App Router for core UI, pages/api used only to bootstrap Socket.io.
+- JWT claims (profileComplete, isDeactivated) to enforce onboarding and access at the edge.
+- Server-side uploads to avoid exposing storage service credentials.
+
+4) Database Design
+Schema design uses a relational model with the following key tables:
+- User: identity, profile, preferences, visibility, onboarding state.
+- Event: hosted events with schedule, location, pricing, capacity, status.
+- EventImage: event gallery and cover image ordering.
+- EventAttendee: attendance state and relationship between user and event.
+- Ticket: paid attendance, paymentIntent, QR validation.
+- Connection: accepted/pending/declined/removed user relationships.
+- Message: chat messages with read receipts.
+- Notification + NotificationSchedule: user notifications and scheduling.
+- OtpToken: OTP sessions for signup/reset.
+- Memory: photos linked to events.
+- EventSwipe, ContactImport, ContactInvitation, ReferralLink: discovery and referrals.
+
+Enums and controlled values:
+- Visibility: private, connections, public.
+- ApprovalMode: auto, manual.
+- EventStatus: upcoming, ongoing, past, cancelled.
+- AttendeeStatus: committed, attended, missed, waitlisted.
+- ConnectionStatus: pending, accepted, declined, removed.
+- MessageType: text, event_card, location.
+- PaymentStatus: pending, paid, refunded, failed.
+
+Relationships:
+- User hosts many Events (Event.hostId).
+- User attends many Events via EventAttendee.
+- Event has many EventImages and EventAttendees.
+- Ticket belongs to Event and User, and may link to EventAttendee.
+- Connection links two Users with a status.
+- Message belongs to Connection and User.
+- NotificationSchedule links User and optional Event for reminders.
+- ContactImport and ContactInvitation link phone numbers to user acquisition.
+
+Indexing:
+- Unique indexes on user.email, user.phone, ticket.qrCode, (eventId, userId) in EventAttendee.
+- OtpToken has an index on (contact, purpose, usedAt).
+- NotificationSchedule has a unique index on (userId, eventId, type, sendAt).
+- Connection pairs are queried in both directions, so user1Id/user2Id are commonly filtered.
+
+Constraints and integrity:
+- EventAttendee enforces one attendance record per user per event.
+- Ticket has unique qrCode and paymentIntentId uniqueness is enforced at the application level.
+- Contact imports are unique per userId + phone.
+
+Data lifecycle:
+- Deactivated users keep their row but are anonymized (email/phone cleared) for re-signup safety.
+- Event deletion cascades via explicit cleanup of related rows (attendees, tickets, swipes, images, memories links).
+- OTP tokens expire and are marked used/verified as part of auth flow.
+
+Query optimization:
+- Event feed caps to 50 rows with computed scoring.
+- Connection suggestions filter on existing relationships and limit results.
+- Notifications limit to 50 by createdAt.
+- Transactions are used for ticket creation and attendance updates to avoid race conditions.
+
+Example queries (logical):
+- Fetch event detail with host, images, and attendee count.
+- Create ticket and attendee inside a transaction after verifying capacity.
+- Find connection requests for user2Id with shared event info.
+- Fetch unread notifications ordered by createdAt.
+- Find shared event attendance for connection suggestions.
+
+5) Backend Deep Dive
+API style: REST endpoints under app/api. Request/response bodies are JSON except storage upload which uses multipart.
+
+Important endpoints (examples):
+- POST /api/auth/send-otp { contact, type, purpose } -> { status }
+- POST /api/auth/verify-otp { contact, otp, purpose } -> { status, token }
+- POST /api/auth/register { contact, password, token } -> { status }
+- POST /api/auth/reset-password { contact, password, token } -> { status }
+
+- GET /api/events -> { events: [ { id, title, category, date, location, imageUrl, lat, lng, score } ] }
+- POST /api/events -> { id }
+- GET /api/events/:id -> full detail + analytics + attendees
+- POST /api/events/:id/commit -> { status }
+
+- POST /api/tickets/create-intent { eventId, quantity } -> { client_secret, payment_intent_id, amount, currency }
+- POST /api/tickets/confirm { eventId, quantity, paymentIntentId } -> { ticketId }
+- POST /api/tickets/validate { qr_code, event_id } -> { status }
+
+- GET /api/chat -> { chats: [...] }
+- GET /api/chat/:connectionId -> { messages: [...] }
+- POST /api/chat/:connectionId { content } -> { message }
+- PUT /api/chat/:connectionId/read -> { status }
+
+Authentication and authorization:
+- NextAuth Credentials + JWT for sessions.
+- getToken validates JWT in API routes and middleware.
+- Ownership checks exist in event edit/delete, gallery edits, ticket validation, and chat access.
+
+Middleware:
+- middleware.ts checks JWT presence, profileComplete, and isDeactivated and redirects accordingly.
+
+Error handling strategy:
+- API routes return JSON with error messages and status codes.
+- Common statuses: 401 unauthorized, 403 forbidden, 404 not found, 409 conflict, 502 upstream failure.
+
+Rate limiting and security practices:
+- OTP resend cooldown is enforced by checking latest OTP timestamp.
+- Stripe webhook verifies signatures.
+- Supabase admin key is server-side only.
+
+6) Frontend Deep Dive
+Component architecture:
+- UI primitives in components/ui (PageShell, SectionCard, Button) used across screens.
+- Feature components in components/events and components/profile.
+
+State management:
+- Local component state for forms and lists.
+- Zustand store for simple UI/auth state in store/.
+
+Routing:
+- App Router with route groups: (auth) and (main).
+- Dynamic routes for events, chat, and users.
+
+Performance optimization:
+- Dynamic import for map components to avoid SSR issues.
+- Minimal client state, fetch on mount for lists.
+- Controlled inputs with react-hook-form.
+
+Handling API calls:
+- fetch to app/api endpoints from client components.
+- Success and error states are surfaced in UI with inline messages.
+
+UI/UX decisions:
+- Event discovery uses swipe interactions and cards for quick decisions.
+- Profile hub is calendar-first to reinforce event identity.
+- Host dashboard consolidates analytics, attendees, and gallery tools.
+
+7) End-to-End Flow (Example)
+User taps Accept on a free event:
+1) UI calls POST /api/events/:id/commit.
+2) Server validates JWT, checks event capacity, creates EventAttendee in a transaction, increments currentAttendees.
+3) Optional reminder schedules are created for enabled users.
+4) Response returns status: committed.
+5) UI stores a pending calendar entry and navigates user to details or profile.
+
+8) DevOps and Deployment
+Hosting: Next.js app can be deployed to Vercel or any Node hosting. PostgreSQL runs on Supabase. Supabase Storage holds public buckets.
+
+CI/CD:
+- Build step runs prisma generate and next build.
+- Migrations applied with prisma migrate deploy in production using DIRECT_URL.
+
+CI/CD details:
+- Lint and typecheck stage before build.
+- Unit/integration tests in CI with environment-specific secrets.
+- Preview deployments for PRs; production deploys on main.
+
+Environment variables:
+- DATABASE_URL, DIRECT_URL
+- NEXTAUTH_SECRET, NEXTAUTH_URL
+- STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY
+- NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+- EMAIL_USER, EMAIL_PASS, EMAIL_FROM
+
+Monitoring/logging:
+- API routes log failures to console.
+- Stripe webhook errors are logged on signature failures and exceptions.
+
+9) Performance Optimization
+- Event feed limited to 50 and scored in memory.
+- Suggestions capped to reduce DB load.
+- Notifications limited to 50 by createdAt.
+- Media stored in Supabase Storage instead of DB blobs.
+- Dynamic import for maps reduces SSR overhead.
+
+Caching:
+- Redis or edge cache for event feed and suggestions (short TTL, e.g., 1-5 minutes).
+- CDN caching for static assets and public images.
+
+10) Security
+- SQL injection prevention via Prisma parameterized queries.
+- Passwords and OTPs are hashed (bcrypt).
+- Stripe webhook signature verification.
+- Supabase service role key never exposed to clients.
+- JWT session checks in middleware and API routes.
+
+Security hardening:
+- Rate limiting per IP/user for OTP and login endpoints.
+- Secure headers (CSP, HSTS, X-Frame-Options, Referrer-Policy).
+- Audit logs for critical actions (deactivate user, refund, event delete).
+
+11) Testing Strategy
+- Unit tests for utility functions (normalization, scoring) are recommended.
+- Integration tests for OTP flows, ticket purchase, and webhook idempotency are recommended.
+- E2E tests should cover signup, event creation, commit, and chat flows.
+
+Observability:
+- Centralized logs and error tracking (e.g., Sentry).
+- Metrics for latency, error rate, and payment failures.
+- Alerts for webhook failures and OTP delivery issues.
+
+12) Challenges and Solutions
+- Realtime chat in App Router: solved by bootstrapping Socket.io through pages/api and emitting from app/api via a global server reference.
+- Event suggestions quality: solved with fallback relevance logic based on preferences and city.
+- Media security: server-side upload to Supabase to avoid exposing service keys.
+
+13) Improvements and Future Scope
+- Add pagination and server-side filtering to feeds.
+- Add Redis adapter for Socket.io scaling.
+- Add push notifications and device token management.
+- Add moderation and admin tooling for events and users.
+- Add analytics pipeline for ranking tuning.
+
+14) Interview Questions and Strong Answers 
+
+
+1. Why choose Next.js App Router? 
+-> Unified full-stack routing, SSR/CSR flexibility, and easy API colocation.
+
+2. How do you prevent duplicate ticket creation? 
+-> PaymentIntent id checks and transactional creation in webhook/confirm flows.
+
+3. How do you ensure event capacity is respected? 
+-> Transactional read of currentAttendees and conditional updates; return 409 on full.
+
+4. How do you secure OTP flows? 
+-> Hash email OTPs, Twilio Verify for phone, expire tokens, enforce resend cooldown.
+
+5. How do you model connections? 
+-> Connection table linking user1Id/user2Id with status and timestamps.
+
+6. How is chat authorization enforced? 
+-> Only connection members can read or send messages.
+
+7. Why use Stripe webhooks? 
+-> Source of truth for payment completion and idempotent ticket creation.
+
+8. How do you handle event discovery relevance? 
+-> Scoring combining distance, preferences, time, popularity, connections.
+
+9. What are the trade-offs of a monolith? 
+-> Faster iteration but requires extra work for scaling realtime and separating services.
+
+10. How do you scale Socket.io? 
+-> Use a Redis adapter and sticky sessions or a dedicated realtime tier.
+
+11. How do you handle image uploads securely? 
+-> Server-side multipart to Supabase Admin with bucket allowlist.
+
+12. How do you enforce onboarding? 
+-> Middleware checks profileComplete and redirects.
+
+13. What prevents access by deactivated users? 
+-> JWT flag plus middleware redirects and auth checks.
+
+14. How do you ensure notification delivery? 
+-> Schedule table + dispatch job with secret header.
+
+15. How do you optimize DB queries? 
+-> Limit result sets, select only required fields, use indexes.
+
+16. How are refunds handled? 
+-> Validate ownership, refund window, and Stripe charge before updates.
+
+17. How would you add caching? 
+-> Cache event feed and suggestions in Redis with short TTLs.
+
+18. How do you ensure data privacy? 
+-> Profile visibility checks on /api/users/:id.
+
+19. How do you prevent race conditions? 
+-> Transactions around capacity checks and ticket creation.
+
+20. How would you test webhooks? 
+-> Use Stripe CLI and verify idempotency with repeated events.
+
+15) Elevator Pitch 
+OUTTACOUCH is an event-first social platform that uses real attendance to drive connections. Users discover nearby events, commit to attend, and automatically connect with people they meet. The system is built on Next.js with Prisma and PostgreSQL, Stripe for payments, Supabase for media, and Socket.io for realtime chat. The focus is on relevance, safety, and high-quality social interactions grounded in real-world experiences.
+
+
